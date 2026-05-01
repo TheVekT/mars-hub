@@ -53,7 +53,7 @@
         "author": "TheVekT",
         "description": "Provides remote control capabilities for the system.",
         "compatibility": ["windows", "linux"],
-        "required_tools": []
+        "required_tools": ["ffmpeg"]
     },
     {
         "name": "Server Console",
