@@ -1,0 +1,9 @@
+{
+  "name": "Remote Control",
+  "version": "1.0.0",
+  "author": "TheVekT",
+  "description": "Provides remote control capabilities for the system.",
+  "compatibility": ["windows", "linux"],
+  "required_tools": [],
+  "entry_point": "__init__.py"
+}

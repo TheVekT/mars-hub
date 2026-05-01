@@ -1,0 +1,9 @@
+{
+  "name": "File Explorer",
+  "version": "1.0.0",
+  "author": "TheVekT",
+  "description": "Provides file exploration and management capabilities.",
+  "compatibility": ["windows", "linux"],
+  "required_tools": [],
+  "entry_point": "__init__.py"
+}

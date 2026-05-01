@@ -1,0 +1,9 @@
+{
+  "name": "Audio Manager",
+  "version": "1.0.0",
+  "author": "TheVekT",
+  "description": "Monitors and manages audio devices, providing real-time audio data streaming and control capabilities.",
+  "compatibility": ["windows"],
+  "required_tools": [],
+  "entry_point": "__init__.py"
+}

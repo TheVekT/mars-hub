@@ -1,0 +1,9 @@
+{
+  "name": "Clipboard Sync",
+  "version": "1.0.0",
+  "author": "TheVekT",
+  "description": "Synchronizes clipboard content across multiple devices.",
+  "compatibility": ["windows", "linux"],
+  "required_tools": ["linux: xclip", "linux: xsel", "linux: wl_clipboard"],
+  "entry_point": "__init__.py"
+}

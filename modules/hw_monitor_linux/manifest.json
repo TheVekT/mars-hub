@@ -1,0 +1,9 @@
+{
+  "name": "Hardware Monitor (Linux)",
+  "version": "1.0.0",
+  "author": "TheVekT",
+  "description": "Monitors and manages hardware components, providing real-time system information and control capabilities.",
+  "compatibility": ["linux"],
+  "required_tools": [],
+  "entry_point": "__init__.py"
+}

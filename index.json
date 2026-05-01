@@ -1,0 +1,74 @@
+[
+    {
+        "name": "Audio Manager",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Monitors and manages audio devices, providing real-time audio data streaming and control capabilities.",
+        "compatibility": ["windows"],
+        "required_tools": []
+    },
+    {
+        "name": "Clipboard Sync",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Synchronizes clipboard content across multiple devices.",
+        "compatibility": ["windows", "linux"],
+        "required_tools": ["linux: xclip", "linux: xsel", "linux: wl_clipboard"]
+    },
+    {
+        "name": "File Explorer",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Provides file exploration and management capabilities.",
+        "compatibility": ["windows", "linux"],
+        "required_tools": []
+    },
+    {
+        "name": "Hardware Monitor",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Monitors and manages hardware components, providing real-time system information and control capabilities.",
+        "compatibility": ["windows"],
+        "required_tools": ["LibreHardwareMonitorLibrary"]
+    },
+    {
+        "name": "Hardware Monitor (Linux)",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Monitors and manages hardware components, providing real-time system information and control capabilities.",
+        "compatibility": ["linux"],
+        "required_tools": []
+    },
+    {
+        "name": "OS Info",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Provides information about the operating system.",
+        "compatibility": ["windows", "linux"],
+        "required_tools": []
+    },
+    {
+        "name": "Remote Control",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Provides remote control capabilities for the system.",
+        "compatibility": ["windows", "linux"],
+        "required_tools": []
+    },
+    {
+        "name": "Server Console",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Provides a console log from the server.",
+        "compatibility": ["windows", "linux"],
+        "required_tools": []
+    },
+    {
+        "name": "Task Manager",
+        "version": "1.0.0",
+        "author": "TheVekT",
+        "description": "Provides task management capabilities for the system.",
+        "compatibility": ["windows", "linux"],
+        "required_tools": []
+    }
+]
