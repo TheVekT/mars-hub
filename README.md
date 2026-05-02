@@ -17,6 +17,18 @@ It acts as a distribution and discovery layer for third-party modules that exten
 - `index.json` - registry metadata used by the client to resolve available modules.
 - `README.md` - marketplace overview, contribution policy, and publishing notes.
 
+## Registry Structure
+
+The `index.json` file contains metadata for all published modules. Each entry includes:
+
+- `name` - human-readable module name shown in the marketplace.
+- `version` - semantic version of the module package.
+- `author` - module maintainer or organization.
+- `description` - short technical summary of what the module provides.
+- `compatibility` - supported target platforms or runtime environments.
+- `required_tools` - optional list of tools or capabilities the module depends on.
+- `package_name` - the directory name of the module under `modules/` for client-side discovery and loading.
+
 ## Module Distribution Model
 
 Each module should ship with a manifest that describes how the marketplace and the MARS client should treat the module source. A minimal manifest can look like this:
@@ -32,7 +44,7 @@ Each module should ship with a manifest that describes how the marketplace and t
 }
 ```
 
-Field expectations:
+Field expectations for `manifest.json`:
 
 - `name` - human-readable module name shown in the marketplace.
 - `version` - semantic version of the module package.

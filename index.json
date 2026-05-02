@@ -5,7 +5,8 @@
         "author": "TheVekT",
         "description": "Monitors and manages audio devices, providing real-time audio data streaming and control capabilities.",
         "compatibility": ["windows"],
-        "required_tools": []
+        "required_tools": [],
+        "package_name": "audio_manager"
     },
     {
         "name": "Clipboard Sync",
@@ -13,7 +14,8 @@
         "author": "TheVekT",
         "description": "Synchronizes clipboard content across multiple devices.",
         "compatibility": ["windows", "linux"],
-        "required_tools": ["linux: xclip", "linux: xsel", "linux: wl_clipboard"]
+        "required_tools": ["linux: xclip", "linux: xsel", "linux: wl_clipboard"],
+        "package_name": "clipboard_sync"
     },
     {
         "name": "File Explorer",
@@ -21,7 +23,8 @@
         "author": "TheVekT",
         "description": "Provides file exploration and management capabilities.",
         "compatibility": ["windows", "linux"],
-        "required_tools": []
+        "required_tools": [],
+        "package_name": "file_explorer"
     },
     {
         "name": "Hardware Monitor",
@@ -29,7 +32,8 @@
         "author": "TheVekT",
         "description": "Monitors and manages hardware components, providing real-time system information and control capabilities.",
         "compatibility": ["windows"],
-        "required_tools": ["LibreHardwareMonitorLibrary"]
+        "required_tools": ["LibreHardwareMonitorLibrary"],
+        "package_name": "hw_monitor"
     },
     {
         "name": "Hardware Monitor (Linux)",
@@ -37,7 +41,8 @@
         "author": "TheVekT",
         "description": "Monitors and manages hardware components, providing real-time system information and control capabilities.",
         "compatibility": ["linux"],
-        "required_tools": []
+        "required_tools": [],
+        "package_name": "hw_monitor_linux"
     },
     {
         "name": "OS Info",
@@ -45,7 +50,8 @@
         "author": "TheVekT",
         "description": "Provides information about the operating system.",
         "compatibility": ["windows", "linux"],
-        "required_tools": []
+        "required_tools": [],
+        "package_name": "os_info"
     },
     {
         "name": "Remote Control",
@@ -53,7 +59,8 @@
         "author": "TheVekT",
         "description": "Provides remote control capabilities for the system.",
         "compatibility": ["windows", "linux"],
-        "required_tools": ["ffmpeg"]
+        "required_tools": ["ffmpeg"],
+        "package_name": "remote_control"
     },
     {
         "name": "Server Console",
@@ -61,7 +68,8 @@
         "author": "TheVekT",
         "description": "Provides a console log from the server.",
         "compatibility": ["windows", "linux"],
-        "required_tools": []
+        "required_tools": [],
+        "package_name": "server_console"
     },
     {
         "name": "Task Manager",
@@ -69,6 +77,7 @@
         "author": "TheVekT",
         "description": "Provides task management capabilities for the system.",
         "compatibility": ["windows", "linux"],
-        "required_tools": []
+        "required_tools": [],
+        "package_name": "task_manager"
     }
 ]
