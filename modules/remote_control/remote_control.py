@@ -1,18 +1,24 @@
-__requirements__ = ["pyautogui", "pyaudio"]
+__requirements__ = ["PyAudioWPatch"]
 
 import os
 import json
 import asyncio
 import platform
-import threading
 from fastapi import WebSocket, WebSocketDisconnect
 from mars.core.websocket.registry import mars_ws_module, ws_endpoint, ws_registry
-import pyautogui
 
+if platform.system() == "Windows":
+    from .input_windows import WindowsInputInjector as InputInjector
+else:
+    from .input_linux import LinuxInputInjector as InputInjector
+    
 try:
-    import pyaudio
+    import pyaudiowpatch as pyaudio
 except ImportError:
-    pyaudio = None
+    try:
+        import pyaudio
+    except ImportError:
+        pyaudio = None
 
 @mars_ws_module(
     name="Remote Control", 
@@ -23,17 +29,7 @@ except ImportError:
 class RemoteControlModule:
     
     def __init__(self):
-        pyautogui.FAILSAFE = False
-        pyautogui.PAUSE = 0.0  
-        
-        self.key_map = {
-            "Control": "ctrl", "Shift": "shift", "Alt": "alt",
-            "Enter": "enter", "Backspace": "backspace", "Delete": "delete",
-            "Escape": "esc", "Tab": "tab", "ArrowUp": "up",
-            "ArrowDown": "down", "ArrowLeft": "left", "ArrowRight": "right",
-            "Meta": "win", " ": "space"
-        }
-        
+        self.injector = InputInjector()
         self.os_system = platform.system()
         self.show_cursor = True
         self.quality_mode = "optimal"
@@ -44,17 +40,9 @@ class RemoteControlModule:
         self.audio_websockets = set()
         self.audio_task = None
 
-    def _map_key(self, js_key: str) -> str:
-        """Map a browser key name to a pyautogui key name."""
-        if len(js_key) == 1: return js_key.lower()
-        return self.key_map.get(js_key, js_key.lower())
-
     def _get_ffmpeg_cmd(self, show_cursor: bool, quality_mode: str):
-        """Build the FFmpeg command for the current OS and quality settings."""
         draw = "1" if show_cursor else "0"
-        
-        # Get the primary monitor's resolution. Primary monitor top-left is always (0, 0).
-        width, height = pyautogui.size()
+        width, height = self.injector.get_screen_size()
         
         if self.os_system == "Windows":
             input_format = [
@@ -74,7 +62,6 @@ class RemoteControlModule:
 
         if quality_mode == "best":
             crf = "20"
-            scale = "iw:ih"
         elif quality_mode == "optimal":
             crf = "28"
             scale = "iw*0.8:ih*0.8"
@@ -85,11 +72,8 @@ class RemoteControlModule:
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             *input_format,
-            "-c:v", "libx264", 
-            "-preset", "ultrafast", 
-            "-tune", "zerolatency",
-            "-crf", crf,
-            "-vf", f"scale={scale}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-crf", crf, "-vf", f"scale={scale}",
             "-pix_fmt", "yuv420p", "-f", "h264", "-"
         ]
 
@@ -124,7 +108,91 @@ class RemoteControlModule:
         finally:
             if process.returncode is None:
                 process.terminate()
+
+    async def _windows_audio_broadcaster(self):
+        """Capture system audio on Windows using WASAPI loopback (PyAudioWPatch).
+        No Stereo Mix needed — captures directly from the default output device.
+        Resamples to s16le mono 22050Hz to match the client's ffplay format.
+        """
+        import audioop
+        
+        p = pyaudio.PyAudio()
+        try:
+            # Find WASAPI host API
+            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_output_idx = wasapi_info["defaultOutputDevice"]
+            default_speakers = p.get_device_info_by_index(default_output_idx)
+            
+            # Find the loopback device that corresponds to the default speakers
+            # PyAudioWPatch exposes loopback devices with isLoopbackDevice=True
+            loopback_device = None
+            for i in range(p.get_device_count()):
+                dev = p.get_device_info_by_index(i)
+                if dev.get("isLoopbackDevice") and default_speakers["name"] in dev["name"]:
+                    loopback_device = dev
+                    break
+            
+            if loopback_device is None:
+                print(f"[Audio] No WASAPI loopback device found for '{default_speakers['name']}'")
+                return
+            
+            native_rate = int(loopback_device["defaultSampleRate"])
+            native_channels = loopback_device["maxInputChannels"]
+            
+            CHUNK = 1024
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=native_channels,
+                rate=native_rate,
+                input=True,
+                input_device_index=loopback_device["index"],
+                frames_per_buffer=CHUNK,
+            )
+            
+            TARGET_RATE = 22050
+            loop = asyncio.get_event_loop()
+            
+            try:
+                while True:
+                    # Read audio in a thread to avoid blocking the event loop
+                    raw = await loop.run_in_executor(
+                        None, lambda: stream.read(CHUNK, exception_on_overflow=False)
+                    )
+                    if not raw:
+                        break
+                    
+                    # Convert to mono if stereo
+                    data = raw
+                    if native_channels > 1:
+                        data = audioop.tomono(data, 2, 1, 1)
+                    
+                    # Resample to 22050Hz if needed
+                    if native_rate != TARGET_RATE:
+                        data, _ = audioop.ratecv(data, 2, 1, native_rate, TARGET_RATE, None)
+                    
+                    
+                    if not self.audio_websockets:
+                        continue
+                    
+                    dead = set()
+                    for ws in self.audio_websockets:
+                        try:
+                            await ws.send_bytes(data)
+                        except RuntimeError:
+                            dead.add(ws)
+                    for ws in dead:
+                        self.audio_websockets.discard(ws)
+                        
+            except asyncio.CancelledError:
+                pass
+            finally:
+                stream.close()
                 
+        except Exception as e:
+            print(f"[Audio] WASAPI loopback error: {e}")
+        finally:
+            p.terminate()
+
     async def _audio_broadcaster(self):
         """Continuously read audio and broadcast it only to connected listeners."""
         env = os.environ.copy()
@@ -161,13 +229,12 @@ class RemoteControlModule:
                 print(f"[Audio error] {e}")
                 
         elif self.os_system == "Windows":
-            audio_cmd = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-probesize", "32", "-analyzeduration", "0",
-                "-fflags", "nobuffer", "-flags", "low_delay",
-                "-f", "dshow", "-i", "audio=Stereo Mix", 
-                "-ac", "1", "-ar", "22050", "-f", "s16le", "-flush_packets", "1", "-"
-            ]
+            # Use PyAudio WASAPI loopback — captures system audio directly, no Stereo Mix needed
+            if pyaudio is None:
+                print("[Audio] PyAudioWPatch not installed. Install with: pip install PyAudioWPatch")
+                return
+            await self._windows_audio_broadcaster()
+            return
 
         if not audio_cmd: return
 
@@ -178,7 +245,8 @@ class RemoteControlModule:
             
             while True:
                 data = await process.stdout.read(2048)
-                if not data: break
+                if not data:
+                    break
                 
                 if not self.audio_websockets:
                     continue 
@@ -211,7 +279,8 @@ class RemoteControlModule:
 
     async def _receive_commands(self, websocket: WebSocket):
         """Receive and execute remote control commands from the client."""
-        screen_width, screen_height = pyautogui.size()
+        screen_width, screen_height = self.injector.get_screen_size()
+        
         try:
             while True:
                 data_str = await websocket.receive_text()
@@ -232,33 +301,30 @@ class RemoteControlModule:
                         self.switch_event.set()
                     continue
 
-                button = command.get("button", "left")
                 abs_x, abs_y = None, None
                 if "x" in command and "y" in command:
                     abs_x = int(command["x"] * screen_width)
                     abs_y = int(command["y"] * screen_height)
-
                 if action == "mouse_move" and abs_x is not None:
-                    pyautogui.moveTo(abs_x, abs_y)
-                elif action == "mouse_down" and abs_x is not None:
-                    pyautogui.mouseDown(x=abs_x, y=abs_y, button=button)
-                elif action == "mouse_up" and abs_x is not None:
-                    pyautogui.mouseUp(x=abs_x, y=abs_y, button=button)
-                elif action == "click" and abs_x is not None:
-                    if button == "right": pyautogui.rightClick(x=abs_x, y=abs_y)
-                    elif button == "middle": pyautogui.middleClick(x=abs_x, y=abs_y)
-                    else: pyautogui.click(x=abs_x, y=abs_y)
+                    self.injector.mouse_move(abs_x, abs_y)
+                    
+                elif action == "mouse_click":
+                    button = command.get("button", "left")
+                    state = command.get("state", "down")
+                    self.injector.mouse_click(button, state == "down")
+                    
                 elif action == "scroll":
-                    direction = command.get("direction", 0) 
-                    multiplier = -120 if self.os_system == "Windows" else -1
-                    clicks = int(direction * multiplier)
-                    if abs_x is not None and abs_y is not None:
-                        pyautogui.scroll(clicks, x=abs_x, y=abs_y)
-                    else: pyautogui.scroll(clicks)
-                elif action == "key_down":
-                    pyautogui.keyDown(self._map_key(command.get("key")))
-                elif action == "key_up":
-                    pyautogui.keyUp(self._map_key(command.get("key")))
+                    clicks = command.get("clicks", 0)
+                    self.injector.mouse_scroll(clicks)
+                    
+                elif action == "scancode":
+                    code = command.get("code", 0)
+                    state = command.get("state", "down")
+                    self.injector.inject_scancode(code, state == "down")
+                    
+                elif action == "unicode":
+                    char = command.get("char", "")
+                    self.injector.inject_unicode(char)
 
         except (WebSocketDisconnect, asyncio.CancelledError, json.JSONDecodeError):
             pass
@@ -293,11 +359,9 @@ class RemoteControlModule:
             if self.audio_task: self.audio_task.cancel()
             print("[Remote Control] Connection closed")
 
-
     @ws_endpoint(path="/audio")
     async def audio_stream(self, websocket: WebSocket):
         """Stream audio only over WebSocket."""
-
         await websocket.accept()
         print("[Remote Control] Client connected to the audio channel.")
         
