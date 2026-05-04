@@ -1,4 +1,4 @@
-__requirements__ = ["PyAudioWPatch"]
+__requirements__ = ["PyAudioWPatch", "pyaudio"]
 
 import os
 import json
