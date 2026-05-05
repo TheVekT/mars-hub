@@ -1,6 +1,6 @@
 {
   "name": "Clipboard Sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "TheVekT",
   "description": "Synchronizes clipboard content across multiple devices.",
   "compatibility": ["windows", "linux"],
