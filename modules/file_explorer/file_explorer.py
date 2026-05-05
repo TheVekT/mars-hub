@@ -24,7 +24,7 @@ class FileExplorerModule:
             return name.startswith('.')
         try:
             attrs = ctypes.windll.kernel32.GetFileAttributesW(path)
-            return attrs != -1 and (attrs & 2) 
+            return attrs != -1 and bool(attrs & 2)
         except:
             return False
 
@@ -212,8 +212,6 @@ class FileExplorerModule:
 
                         elif action == "upload_request":
                             pending_upload_meta = payload
-                            pending_upload_expected = payload.get("total_size", 0)
-                            pending_upload_buffer = bytearray()
                             await websocket.send_text(json.dumps({"status": "ready_for_bytes"}))
 
                     except FileExistsError as e:
