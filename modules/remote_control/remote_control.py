@@ -44,19 +44,6 @@ class RemoteControlModule:
         draw = "1" if show_cursor else "0"
         width, height = self.injector.get_screen_size()
         
-        if self.os_system == "Windows":
-            input_format = [
-                "-f", "gdigrab", "-framerate", "30", "-draw_mouse", draw,
-                "-offset_x", "0", "-offset_y", "0", "-video_size", f"{width}x{height}",
-                "-i", "desktop"
-            ]
-        else:
-            display = os.environ.get('DISPLAY', ':0.0')
-            input_format = [
-                "-f", "x11grab", "-framerate", "30", "-draw_mouse", draw,
-                "-video_size", f"{width}x{height}", "-i", f"{display}+0,0"
-            ]
-
         crf = "28"
         scale = "iw:ih"
 
@@ -69,13 +56,67 @@ class RemoteControlModule:
             crf = "35"
             scale = "iw*0.6:ih*0.6"
 
-        return [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            *input_format,
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-crf", crf, "-vf", f"scale={scale}",
-            "-pix_fmt", "yuv420p", "-f", "h264", "-"
-        ]
+        if self.os_system == "Windows":
+            return [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "gdigrab", "-framerate", "30", "-draw_mouse", draw,
+                "-offset_x", "0", "-offset_y", "0", "-video_size", f"{width}x{height}",
+                "-i", "desktop",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-crf", crf, "-vf", f"scale={scale}",
+                "-pix_fmt", "yuv420p", "-f", "h264", "-"
+            ]
+        else:
+            # Linux: Attempt to break through X11 protection and support Wayland
+            import pwd
+            try:
+                # Same user detection as audio_stream
+                real_user = os.environ.get("SUDO_USER") or pwd.getpwuid(1000).pw_name
+                user_info = pwd.getpwnam(real_user)
+                real_uid = user_info.pw_uid
+                real_home = user_info.pw_dir
+                
+                env_xdg = f"XDG_RUNTIME_DIR=/run/user/{real_uid}"
+                
+                # Detect Wayland by checking the runtime directory
+                is_wayland = os.path.exists(os.path.join(env_xdg, "wayland-0"))
+                
+                if is_wayland:
+                    # Wayland path: use PipeWire (triggers portal permission dialog)
+                    return [
+                        "sudo", "-u", real_user, "env", f"XDG_RUNTIME_DIR={env_xdg}",
+                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "-f", "pipewire", "-framerate", "30", "-i", "any",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                        "-crf", crf, "-vf", f"scale={scale}",
+                        "-pix_fmt", "yuv420p", "-f", "h264", "-"
+                    ]
+                else:
+                    # X11 path: use x11grab with detected display and authority
+                    display = os.environ.get('DISPLAY') or ':0'
+                    xauth = os.path.join(real_home, ".Xauthority")
+                    
+                    return [
+                        "sudo", "-u", real_user, "env", 
+                        f"DISPLAY={display}", f"XAUTHORITY={xauth}", f"XDG_RUNTIME_DIR={env_xdg}",
+                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "-f", "x11grab", "-framerate", "30", "-draw_mouse", draw,
+                        "-video_size", f"{width}x{height}", "-i", f"{display}+0,0",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                        "-crf", crf, "-vf", f"scale={scale}",
+                        "-pix_fmt", "yuv420p", "-f", "h264", "-"
+                    ]
+            except Exception as e:
+                # Fallback to basic X11 capture if detection fails
+                display = os.environ.get('DISPLAY', ':0.0')
+                return [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "x11grab", "-framerate", "30", "-draw_mouse", draw,
+                    "-video_size", f"{width}x{height}", "-i", f"{display}+0,0",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-crf", crf, "-vf", f"scale={scale}",
+                    "-pix_fmt", "yuv420p", "-f", "h264", "-"
+                ]
 
     async def _ffmpeg_worker(self, show_cursor: bool, quality_mode: str, is_transition=False):
         """Run FFmpeg and push encoded chunks into the video queue."""
