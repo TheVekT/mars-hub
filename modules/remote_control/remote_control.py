@@ -4,6 +4,7 @@ import os
 import json
 import asyncio
 import platform
+import logging
 from fastapi import WebSocket, WebSocketDisconnect
 from mars.core.websocket.registry import mars_ws_module, ws_endpoint, ws_registry
 
@@ -20,6 +21,8 @@ except ImportError:
     except ImportError:
         pyaudio = None
 
+logger = logging.getLogger("MARS.RemoteControl")
+
 @mars_ws_module(
     name="Remote Control", 
     prefix="/remote", 
@@ -31,31 +34,10 @@ class RemoteControlModule:
     def __init__(self):
         self.injector = InputInjector()
         self.os_system = platform.system()
-        self.show_cursor = True
-        self.quality_mode = "optimal"
-        
-        self.video_queue = asyncio.Queue(maxsize=100)
-        self.switch_event = asyncio.Event()
-        self.active_process = None
         self.audio_websockets = set()
         self.audio_task = None
 
-    def _get_ffmpeg_cmd(self, show_cursor: bool, quality_mode: str):
-        draw = "1" if show_cursor else "0"
-        width, height = self.injector.get_screen_size()
-        
-        crf = "28"
-        scale = "iw:ih"
-
-        if quality_mode == "best":
-            crf = "20"
-        elif quality_mode == "optimal":
-            crf = "28"
-            scale = "iw*0.8:ih*0.8"
-        elif quality_mode == "performance":
-            crf = "35"
-            scale = "iw*0.6:ih*0.6"
-
+    def _get_ffmpeg_cmd(self, width, height, draw, crf, scale):
         if self.os_system == "Windows":
             return [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -67,356 +49,185 @@ class RemoteControlModule:
                 "-pix_fmt", "yuv420p", "-f", "h264", "-"
             ]
         else:
-            # Linux: Attempt to break through X11 protection and support Wayland
-            import pwd
-            try:
-                # Same user detection as audio_stream
-                real_user = os.environ.get("SUDO_USER") or pwd.getpwuid(1000).pw_name
-                user_info = pwd.getpwnam(real_user)
-                real_uid = user_info.pw_uid
-                real_home = user_info.pw_dir
-                
-                env_xdg = f"XDG_RUNTIME_DIR=/run/user/{real_uid}"
-                
-                # Detect Wayland by checking the runtime directory
-                is_wayland = os.path.exists(os.path.join(env_xdg, "wayland-0"))
-                
-                if is_wayland:
-                    # Wayland path: use PipeWire (triggers portal permission dialog)
-                    return [
-                        "sudo", "-u", real_user, "env", f"XDG_RUNTIME_DIR={env_xdg}",
-                        "ffmpeg", "-hide_banner", "-loglevel", "error",
-                        "-f", "pipewire", "-framerate", "30", "-i", "any",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                        "-crf", crf, "-vf", f"scale={scale}",
-                        "-pix_fmt", "yuv420p", "-f", "h264", "-"
-                    ]
-                else:
-                    # X11 path: use x11grab with detected display and authority
-                    display = os.environ.get('DISPLAY') or ':0'
-                    xauth = os.path.join(real_home, ".Xauthority")
-                    
-                    return [
-                        "sudo", "-u", real_user, "env", 
-                        f"DISPLAY={display}", f"XAUTHORITY={xauth}", f"XDG_RUNTIME_DIR={env_xdg}",
-                        "ffmpeg", "-hide_banner", "-loglevel", "error",
-                        "-f", "x11grab", "-framerate", "30", "-draw_mouse", draw,
-                        "-video_size", f"{width}x{height}", "-i", f"{display}+0,0",
-                        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                        "-crf", crf, "-vf", f"scale={scale}",
-                        "-pix_fmt", "yuv420p", "-f", "h264", "-"
-                    ]
-            except Exception as e:
-                # Fallback to basic X11 capture if detection fails
-                display = os.environ.get('DISPLAY', ':0.0')
-                return [
-                    "ffmpeg", "-hide_banner", "-loglevel", "error",
-                    "-f", "x11grab", "-framerate", "30", "-draw_mouse", draw,
-                    "-video_size", f"{width}x{height}", "-i", f"{display}+0,0",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                    "-crf", crf, "-vf", f"scale={scale}",
-                    "-pix_fmt", "yuv420p", "-f", "h264", "-"
-                ]
+            # On Linux, the server is already running in the user session via sudo from Daemon
+            display = os.environ.get('DISPLAY', ':0')
+            return [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "x11grab", "-framerate", "30", "-draw_mouse", draw,
+                "-video_size", f"{width}x{height}", "-i", f"{display}+0,0",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-crf", crf, "-vf", f"scale={scale}",
+                "-pix_fmt", "yuv420p", "-f", "h264", "-"
+            ]
 
-    async def _ffmpeg_worker(self, show_cursor: bool, quality_mode: str, is_transition=False):
-        """Run FFmpeg and push encoded chunks into the video queue."""
-        cmd = self._get_ffmpeg_cmd(show_cursor, quality_mode) 
-        
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL
-        )
-        
-        if is_transition:
-            first_chunk = await process.stdout.read(4096)
-            if first_chunk:
-                if self.active_process:
-                    self.active_process.terminate()
-                self.active_process = process
-                await self.video_queue.put(first_chunk)
-        else:
-            self.active_process = process
+    async def _ffmpeg_worker(self, video_queue, options, process_ref):
+        width, height = self.injector.get_screen_size()
+        draw = "1" if options['show_cursor'] else "0"
+        crf = "28"
+        scale = "iw:ih"
+        if options['quality'] == "best": crf = "20"
+        elif options['quality'] == "optimal": scale = "iw*0.8:ih*0.8"
+        elif options['quality'] == "performance": crf = "35"; scale = "iw*0.6:ih*0.6"
 
-        try:
-            while True:
-                chunk = await process.stdout.read(8192)
-                if not chunk: break
-                if self.active_process == process:
-                    await self.video_queue.put(chunk)
-                else:
-                    break
-        finally:
-            if process.returncode is None:
-                process.terminate()
-
-    async def _windows_audio_broadcaster(self):
-        """Capture system audio on Windows using WASAPI loopback (PyAudioWPatch).
-        No Stereo Mix needed — captures directly from the default output device.
-        Resamples to s16le mono 22050Hz to match the client's ffplay format.
-        """
-        import audioop
-        
-        p = pyaudio.PyAudio()
-        try:
-            # Find WASAPI host API
-            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            default_output_idx = wasapi_info["defaultOutputDevice"]
-            default_speakers = p.get_device_info_by_index(default_output_idx)
-            
-            # Find the loopback device that corresponds to the default speakers
-            # PyAudioWPatch exposes loopback devices with isLoopbackDevice=True
-            loopback_device = None
-            for i in range(p.get_device_count()):
-                dev = p.get_device_info_by_index(i)
-                if dev.get("isLoopbackDevice") and default_speakers["name"] in dev["name"]:
-                    loopback_device = dev
-                    break
-            
-            if loopback_device is None:
-                print(f"[Audio] No WASAPI loopback device found for '{default_speakers['name']}'")
-                return
-            
-            native_rate = int(loopback_device["defaultSampleRate"])
-            native_channels = loopback_device["maxInputChannels"]
-            
-            CHUNK = 1024
-            stream = p.open(
-                format=pyaudio.paInt16,
-                channels=native_channels,
-                rate=native_rate,
-                input=True,
-                input_device_index=loopback_device["index"],
-                frames_per_buffer=CHUNK,
-            )
-            
-            TARGET_RATE = 22050
-            loop = asyncio.get_event_loop()
-            
-            try:
-                while True:
-                    # Read audio in a thread to avoid blocking the event loop
-                    raw = await loop.run_in_executor(
-                        None, lambda: stream.read(CHUNK, exception_on_overflow=False)
-                    )
-                    if not raw:
-                        break
-                    
-                    # Convert to mono if stereo
-                    data = raw
-                    if native_channels > 1:
-                        data = audioop.tomono(data, 2, 1, 1)
-                    
-                    # Resample to 22050Hz if needed
-                    if native_rate != TARGET_RATE:
-                        data, _ = audioop.ratecv(data, 2, 1, native_rate, TARGET_RATE, None)
-                    
-                    
-                    if not self.audio_websockets:
-                        continue
-                    
-                    dead = set()
-                    for ws in self.audio_websockets:
-                        try:
-                            await ws.send_bytes(data)
-                        except RuntimeError:
-                            dead.add(ws)
-                    for ws in dead:
-                        self.audio_websockets.discard(ws)
-                        
-            except asyncio.CancelledError:
-                pass
-            finally:
-                stream.close()
-                
-        except Exception as e:
-            print(f"[Audio] WASAPI loopback error: {e}")
-        finally:
-            p.terminate()
-
-    async def _audio_broadcaster(self):
-        """Continuously read audio and broadcast it only to connected listeners."""
-        env = os.environ.copy()
-        audio_cmd = []
-
-        if self.os_system == "Linux":
-            import pwd
-            import subprocess
-            try:
-                real_user = os.environ.get("SUDO_USER") or pwd.getpwuid(1000).pw_name
-                real_uid = pwd.getpwnam(real_user).pw_uid
-                
-                env_xdg = f"XDG_RUNTIME_DIR=/run/user/{real_uid}"
-                env_pulse = f"PULSE_SERVER=unix:/run/user/{real_uid}/pulse/native"
-                
-                monitor_device = "default.monitor" 
-                try:
-                    cmd_pactl = ["sudo", "-u", real_user, "env", env_xdg, env_pulse, "pactl", "get-default-sink"]
-                    default_sink = subprocess.check_output(cmd_pactl).decode("utf-8").strip()
-                    monitor_device = f"{default_sink}.monitor"
-                except Exception:
-                    pass
-
-                print(f"[Remote Control] Configuring audio through parec. Monitor: {monitor_device}")
-                audio_cmd = [
-                    "sudo", "-u", real_user, "env", env_xdg, env_pulse, 
-                    "parec", 
-                    "--format=s16le", 
-                    "--rate=22050", 
-                    "--channels=1", 
-                    "--device", monitor_device
-                ]
-            except Exception as e:
-                print(f"[Audio error] {e}")
-                
-        elif self.os_system == "Windows":
-            # Use PyAudio WASAPI loopback — captures system audio directly, no Stereo Mix needed
-            if pyaudio is None:
-                print("[Audio] PyAudioWPatch not installed. Install with: pip install PyAudioWPatch")
-                return
-            await self._windows_audio_broadcaster()
-            return
-
-        if not audio_cmd: return
-
+        cmd = self._get_ffmpeg_cmd(width, height, draw, crf, scale)
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
-                *audio_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=os.environ.copy()
             )
-            
+            process_ref[0] = process
             while True:
-                data = await process.stdout.read(2048)
+                data = await process.stdout.read(8192)
                 if not data:
+                    err = await process.stderr.read()
+                    if err: logger.error(f"FFmpeg stderr: {err.decode().strip()}")
                     break
-                
-                if not self.audio_websockets:
-                    continue 
-
-                dead_sockets = set()
-                for ws in self.audio_websockets:
-                    try:
-                        await ws.send_bytes(data)
-                    except RuntimeError:
-                        dead_sockets.add(ws)
-                
-                for ws in dead_sockets:
-                    self.audio_websockets.discard(ws)
-                    
-        except asyncio.CancelledError:
-            pass
+                await video_queue.put(data)
+        except Exception as e:
+            logger.error(f"FFmpeg worker failed: {e}")
         finally:
-            if 'process' in locals() and process.returncode is None:
-                process.terminate()
-
-    async def _stream_manager(self):
-        """Manage seamless video stream switching."""
-        asyncio.create_task(self._ffmpeg_worker(self.show_cursor, self.quality_mode))
-        
-        while True:
-            await self.switch_event.wait()
-            self.switch_event.clear()
-            
-            asyncio.create_task(self._ffmpeg_worker(self.show_cursor, self.quality_mode, is_transition=True))
-
-    async def _receive_commands(self, websocket: WebSocket):
-        """Receive and execute remote control commands from the client."""
-        screen_width, screen_height = self.injector.get_screen_size()
-        
-        try:
-            while True:
-                data_str = await websocket.receive_text()
-                command = json.loads(data_str)
-                action = command.get("action")
-
-                if action == "set_quality":
-                    new_mode = command.get("mode")
-                    if new_mode in ["best", "optimal", "performance"] and new_mode != self.quality_mode:
-                        self.quality_mode = new_mode
-                        self.switch_event.set() 
-                    continue
-
-                if action == "toggle_cursor":
-                    new_state = command.get("state", True)
-                    if new_state != self.show_cursor:
-                        self.show_cursor = new_state
-                        self.switch_event.set()
-                    continue
-
-                abs_x, abs_y = None, None
-                if "x" in command and "y" in command:
-                    abs_x = int(command["x"] * screen_width)
-                    abs_y = int(command["y"] * screen_height)
-                if action == "mouse_move" and abs_x is not None:
-                    self.injector.mouse_move(abs_x, abs_y)
-                    
-                elif action == "mouse_click":
-                    button = command.get("button", "left")
-                    state = command.get("state", "down")
-                    self.injector.mouse_click(button, state == "down")
-                    
-                elif action == "scroll":
-                    clicks = command.get("clicks", 0)
-                    self.injector.mouse_scroll(clicks)
-                    
-                elif action == "scancode":
-                    code = command.get("code", 0)
-                    state = command.get("state", "down")
-                    self.injector.inject_scancode(code, state == "down")
-                    
-                elif action == "unicode":
-                    char = command.get("char", "")
-                    self.injector.inject_unicode(char)
-
-        except (WebSocketDisconnect, asyncio.CancelledError, json.JSONDecodeError):
-            pass
+            if process is not None and process.returncode is None:
+                try: process.terminate()
+                except: pass
 
     @ws_endpoint(path="/stream")
     async def stream_and_control(self, websocket: WebSocket):
-        """Stream the desktop video and accept control commands over WebSocket."""
         await websocket.accept()
         
-        if not self.audio_task or self.audio_task.done():
-            self.audio_task = asyncio.create_task(self._audio_broadcaster())
-
-        while not self.video_queue.empty(): self.video_queue.get_nowait()
-        self.is_running = True 
-
-        manager_task = asyncio.create_task(self._stream_manager())
-        control_task = asyncio.create_task(self._receive_commands(websocket))
+        video_queue = asyncio.Queue(maxsize=50)
+        options = {"show_cursor": True, "quality": "optimal"}
+        current_process_ref = [None]
+        worker_task_ref = [None]
         
-        try:
-            while self.is_running:
-                chunk = await self.video_queue.get()
-                if self.is_running: 
-                    await websocket.send_bytes(chunk)
-        except (WebSocketDisconnect, asyncio.CancelledError, RuntimeError):
-            pass
-        finally:
-            self.is_running = False 
-            manager_task.cancel()
-            control_task.cancel()
-            if self.active_process: self.active_process.terminate()
-            
-            if self.audio_task: self.audio_task.cancel()
-            print("[Remote Control] Connection closed")
+        async def start_worker():
+            if worker_task_ref[0]: worker_task_ref[0].cancel()
+            if current_process_ref[0]:
+                try: current_process_ref[0].terminate()
+                except: pass
+            while not video_queue.empty(): video_queue.get_nowait()
+            worker_task_ref[0] = asyncio.create_task(self._ffmpeg_worker(video_queue, options, current_process_ref))
 
-    @ws_endpoint(path="/audio")
-    async def audio_stream(self, websocket: WebSocket):
-        """Stream audio only over WebSocket."""
-        await websocket.accept()
-        print("[Remote Control] Client connected to the audio channel.")
-        
-        self.audio_websockets.add(websocket)
-        
-        if not self.audio_task or self.audio_task.done():
-            self.audio_task = asyncio.create_task(self._audio_broadcaster())
+        await start_worker()
 
         try:
             while True:
-                await websocket.receive_text()
-        except (WebSocketDisconnect, RuntimeError):
-            pass
+                data_task = asyncio.create_task(websocket.receive_text())
+                video_task = asyncio.create_task(video_queue.get())
+                
+                done, pending = await asyncio.wait([data_task, video_task], return_when=asyncio.FIRST_COMPLETED)
+                
+                if video_task in done:
+                    await websocket.send_bytes(video_task.result())
+                
+                if data_task in done:
+                    cmd = json.loads(data_task.result())
+                    action = cmd.get("action")
+                    if action == "set_quality":
+                        options['quality'] = cmd.get("mode", "optimal")
+                        await start_worker()
+                    elif action == "toggle_cursor":
+                        options['show_cursor'] = cmd.get("state", True)
+                        await start_worker()
+                    else:
+                        screen_width, screen_height = self.injector.get_screen_size()
+                        x, y = cmd.get("x"), cmd.get("y")
+                        if x is not None and y is not None:
+                            self.injector.mouse_move(int(x * screen_width), int(y * screen_height))
+                        if action == "mouse_click": self.injector.mouse_click(cmd.get("button", "left"), cmd.get("state") == "down")
+                        elif action == "scroll": self.injector.mouse_scroll(cmd.get("clicks", 0))
+                        elif action == "scancode": self.injector.inject_scancode(cmd.get("code", 0), cmd.get("state") == "down")
+                        elif action == "unicode": self.injector.inject_unicode(cmd.get("char", ""))
+                
+                for p in pending: p.cancel()
+        except: pass
         finally:
-            self.audio_websockets.discard(websocket)
+            if worker_task_ref[0]: worker_task_ref[0].cancel()
+            if current_process_ref[0]:
+                try: current_process_ref[0].terminate()
+                except: pass
+
+    @ws_endpoint(path="/audio")
+    async def audio_stream(self, websocket: WebSocket):
+        await websocket.accept()
+        self.audio_websockets.add(websocket)
+        if not self.audio_task or self.audio_task.done():
+            self.audio_task = asyncio.create_task(self._audio_broadcaster())
+        try:
+            while True: await websocket.receive_text()
+        except: pass
+        finally: self.audio_websockets.discard(websocket)
+
+    async def _audio_broadcaster(self):
+        if self.os_system == "Linux":
+            try:
+                user = os.environ.get("MARS_SESSION_USER")
+                cmd = ["parec", "--format=s16le", "--rate=22050", "--channels=1"]
+                if user:
+                    cmd = ["sudo", "-u", user, "env", f"XDG_RUNTIME_DIR={os.environ.get('XDG_RUNTIME_DIR')}", "parec", "--format=s16le", "--rate=22050", "--channels=1"]
+                
+                process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
+                while True:
+                    data = await process.stdout.read(2048)
+                    if not data: break
+                    for ws in list(self.audio_websockets):
+                        try: await ws.send_bytes(data)
+                        except: self.audio_websockets.discard(ws)
+            except Exception as e:
+                logger.error(f"Linux audio failed: {e}")
+        elif self.os_system == "Windows":
+            if not pyaudio: return
+            p = pyaudio.PyAudio()
+            try:
+                default_out = p.get_default_output_device_info()
+                target_name = default_out.get("name")
+                loopback_device = None
+                
+                for i in range(p.get_device_count()):
+                    info = p.get_device_info_by_index(i)
+                    if info.get("isLoopbackDevice") and target_name in info.get("name"):
+                        loopback_device = info
+                        break
+                
+                if not loopback_device:
+                    for i in range(p.get_device_count()):
+                        info = p.get_device_info_by_index(i)
+                        if info.get("isLoopbackDevice"):
+                            loopback_device = info
+                            break
+                
+                if not loopback_device: return
+
+                native_rate = int(loopback_device.get("defaultSampleRate", 48000))
+                native_channels = int(loopback_device.get("maxInputChannels", 2))
+                
+                stream = p.open(
+                    format=pyaudio.paInt16, 
+                    channels=native_channels, 
+                    rate=native_rate, 
+                    input=True, 
+                    input_device_index=loopback_device["index"]
+                )
+                
+                while True:
+                    raw_data = await asyncio.get_event_loop().run_in_executor(None, lambda: stream.read(1024, exception_on_overflow=False))
+                    if not raw_data: continue
+
+                    # Manual Downsampling: Stereo to Mono and Half Sample Rate
+                    frame_size = native_channels * 2
+                    processed_data = bytearray()
+                    for i in range(0, len(raw_data), frame_size * 2):
+                        processed_data.extend(raw_data[i:i+2])
+                    
+                    data = bytes(processed_data)
+                    for ws in list(self.audio_websockets):
+                        try: await ws.send_bytes(data)
+                        except: self.audio_websockets.discard(ws)
+            except Exception as e:
+                logger.error(f"Windows audio broadcast error: {e}")
+            finally:
+                p.terminate()
 
 ws_registry.register(RemoteControlModule)
